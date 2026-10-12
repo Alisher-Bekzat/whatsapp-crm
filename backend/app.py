@@ -3,7 +3,7 @@ from flask_cors import CORS
 from database import Database
 from parser import WhatsAppParser
 import threading
-import time
+import os
 from config import PARSE_INTERVAL
 
 app = Flask(__name__, static_folder='../frontend', static_url_path='')
@@ -104,53 +104,124 @@ def get_history():
     history = db.get_history()
     return jsonify(history)
 
-# ============= PARSER API =============
+# ============= PARSER API - GROUPS =============
 
-@app.route('/api/parser/start', methods=['POST'])
-def start_parser():
-    """Запустить парсер WhatsApp"""
-    global is_parsing, parser_thread
+@app.route('/api/parser/discover-groups', methods=['POST'])
+def discover_groups():
+    """Обнаружить все WhatsApp группы"""
+    global is_parsing
     
     if is_parsing:
         return jsonify({'message': 'Parser already running'}), 400
     
     is_parsing = True
     
+    def run_discovery():
+        global is_parsing
+        try:
+            if not parser.init_driver():
+                is_parsing = False
+                return
+            
+            groups = parser.discover_groups()
+            
+            # Сохраняем найденные группы
+            for group in groups:
+                db.add_discovered_group(group)
+            
+            is_parsing = False
+        except Exception as e:
+            print(f"❌ Ошибка при обнаружении групп: {e}")
+            is_parsing = False
+    
+    discovery_thread = threading.Thread(target=run_discovery, daemon=True)
+    discovery_thread.start()
+    
+    return jsonify({'message': 'Group discovery started'})
+
+@app.route('/api/parser/groups', methods=['GET'])
+def get_discovered_groups():
+    """Получить найденные группы"""
+    groups = db.get_discovered_groups()
+    return jsonify({'groups': groups})
+
+@app.route('/api/parser/groups/select', methods=['POST'])
+def select_groups():
+    """Сохранить выбранные группы"""
+    data = request.json
+    selected_groups = data.get('groups', [])
+    
+    db.save_selected_groups(selected_groups)
+    
+    return jsonify({'message': 'Groups saved', 'selected': selected_groups})
+
+@app.route('/api/parser/groups/selected', methods=['GET'])
+def get_selected_groups():
+    """Получить выбранные группы"""
+    groups = db.get_selected_groups()
+    return jsonify({'groups': groups})
+
+# ============= PARSER API - CONTROL =============
+
+@app.route('/api/parser/start', methods=['POST'])
+def start_parser():
+    """Запустить парсер WhatsApp с выбранными группами"""
+    global is_parsing, parser_thread
+    
+    if is_parsing:
+        return jsonify({'message': 'Parser already running'}), 400
+    
+    is_parsing = True
+    selected_groups = db.get_selected_groups()
+    
+    if not selected_groups:
+        is_parsing = False
+        return jsonify({'message': 'No groups selected'}), 400
+    
     def run_parser():
         global is_parsing
-        if not parser.start():
+        try:
+            if not parser.driver:
+                if not parser.init_driver():
+                    is_parsing = False
+                    return
+            
+            parser.start(selected_groups, db)
+        except Exception as e:
+            print(f"❌ Ошибка парсинга: {e}")
             is_parsing = False
-            return
-        
-        group_name = request.json.get('group_name', 'Group')
-        
-        while is_parsing:
-            try:
-                messages = parser.get_group_messages(group_name)
-                parser.parse_messages(messages)
-                time.sleep(PARSE_INTERVAL)
-            except Exception as e:
-                print(f"❌ Ошибка парсинга: {e}")
-                time.sleep(5)
     
     parser_thread = threading.Thread(target=run_parser, daemon=True)
     parser_thread.start()
     
-    return jsonify({'message': 'Parser started'})
+    return jsonify({'message': 'Parser started', 'groups': selected_groups})
 
 @app.route('/api/parser/stop', methods=['POST'])
 def stop_parser():
     """Остановить парсер"""
     global is_parsing
     is_parsing = False
-    parser.stop()
+    
+    if parser.driver:
+        parser.stop()
+        parser.close()
     
     return jsonify({'message': 'Parser stopped'})
 
 @app.route('/api/parser/status', methods=['GET'])
 def parser_status():
     """Статус парсера"""
-    return jsonify({'is_running': is_parsing})
+    return jsonify({
+        'is_running': is_parsing,
+        'groups': db.get_selected_groups()
+    })
+
+@app.route('/api/parser/history', methods=['GET'])
+def parser_history():
+    """Получить историю парсинга"""
+    limit = request.args.get('limit', 100, type=int)
+    history = db.get_parse_history(limit)
+    return jsonify(history)
 
 # ============= SERVE FRONTEND =============
 
@@ -167,4 +238,4 @@ def serve_static(path):
 if __name__ == '__main__':
     print("🚀 Starting Flask server...")
     print("📱 Open http://localhost:5000")
-    app.run(debug=True, port=5000)
+    app.run(debug=True, port=5000, host='0.0.0.0')

@@ -20,6 +20,8 @@ class Database:
             description TEXT,
             author TEXT,
             column_id TEXT NOT NULL,
+            source TEXT DEFAULT 'manual',
+            group_name TEXT,
             timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
@@ -44,6 +46,32 @@ class Database:
             FOREIGN KEY(task_id) REFERENCES tasks(id)
         )''')
         
+        # Таблица найденных групп WhatsApp
+        c.execute('''CREATE TABLE IF NOT EXISTS discovered_groups (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            group_name TEXT UNIQUE NOT NULL,
+            last_seen DATETIME DEFAULT CURRENT_TIMESTAMP
+        )''')
+        
+        # Таблица выбранных групп для парсинга
+        c.execute('''CREATE TABLE IF NOT EXISTS selected_groups (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            group_name TEXT UNIQUE NOT NULL,
+            selected BOOLEAN DEFAULT 1,
+            added_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )''')
+        
+        # Таблица истории парсинга
+        c.execute('''CREATE TABLE IF NOT EXISTS parse_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            group_name TEXT NOT NULL,
+            message_text TEXT,
+            author TEXT,
+            flag_found TEXT,
+            task_created BOOLEAN DEFAULT 0,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )''')
+        
         # Инициализация колонок по умолчанию
         c.execute("SELECT COUNT(*) FROM columns")
         if c.fetchone()[0] == 0:
@@ -55,14 +83,14 @@ class Database:
         conn.commit()
         conn.close()
     
-    def add_task(self, title, description="", author="", column_id="col_0"):
+    def add_task(self, title, description="", author="", column_id="col_0", source='manual', group_name=None):
         """Добавить новую задачу"""
         conn = sqlite3.connect(self.db_path)
         c = conn.cursor()
         
-        c.execute('''INSERT INTO tasks (title, description, author, column_id)
-                     VALUES (?, ?, ?, ?)''',
-                 (title, description, author, column_id))
+        c.execute('''INSERT INTO tasks (title, description, author, column_id, source, group_name)
+                     VALUES (?, ?, ?, ?, ?, ?)''',
+                 (title, description, author, column_id, source, group_name))
         
         task_id = c.lastrowid
         
@@ -207,3 +235,94 @@ class Database:
         
         conn.commit()
         conn.close()
+    
+    # ============= Группы WhatsApp =============
+    
+    def get_discovered_groups(self):
+        """Получить найденные группы"""
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        c = conn.cursor()
+        
+        c.execute('SELECT group_name FROM discovered_groups ORDER BY group_name')
+        groups = [row['group_name'] for row in c.fetchall()]
+        
+        conn.close()
+        return groups
+    
+    def add_discovered_group(self, group_name):
+        """Добавить найденную группу в кэш"""
+        conn = sqlite3.connect(self.db_path)
+        c = conn.cursor()
+        
+        try:
+            c.execute('''
+                INSERT OR REPLACE INTO discovered_groups (group_name, last_seen)
+                VALUES (?, CURRENT_TIMESTAMP)
+            ''', (group_name,))
+            conn.commit()
+        except:
+            pass
+        
+        conn.close()
+    
+    def get_selected_groups(self):
+        """Получить выбранные группы для парсинга"""
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        c = conn.cursor()
+        
+        c.execute('SELECT group_name FROM selected_groups WHERE selected = 1')
+        groups = [row['group_name'] for row in c.fetchall()]
+        
+        conn.close()
+        return groups
+    
+    def save_selected_groups(self, group_names):
+        """Сохранить выбранные группы"""
+        conn = sqlite3.connect(self.db_path)
+        c = conn.cursor()
+        
+        # Очистить старые выборы
+        c.execute('DELETE FROM selected_groups')
+        
+        # Добавить новые
+        for group_name in group_names:
+            c.execute('''
+                INSERT INTO selected_groups (group_name, selected)
+                VALUES (?, 1)
+            ''', (group_name,))
+        
+        conn.commit()
+        conn.close()
+        return True
+    
+    def add_parse_history(self, group_name, message_text, author, flag_found, task_created):
+        """Добавить запись в историю парсинга"""
+        conn = sqlite3.connect(self.db_path)
+        c = conn.cursor()
+        
+        c.execute('''
+            INSERT INTO parse_history (group_name, message_text, author, flag_found, task_created)
+            VALUES (?, ?, ?, ?, ?)
+        ''', (group_name, message_text, author, flag_found, task_created))
+        
+        conn.commit()
+        conn.close()
+    
+    def get_parse_history(self, limit=100):
+        """Получить историю парсинга"""
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        c = conn.cursor()
+        
+        c.execute('''
+            SELECT * FROM parse_history 
+            ORDER BY created_at DESC 
+            LIMIT ?
+        ''', (limit,))
+        
+        history = [dict(row) for row in c.fetchall()]
+        
+        conn.close()
+        return history
